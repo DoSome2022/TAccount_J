@@ -1,0 +1,270 @@
+// ============================================================
+// BizOps 企業級會計系統 — Prisma 6 Schema (PostgreSQL)
+// 鐵律對應：
+//  - Hash Chaining：JournalEntry.hash / prevHash（SHA-256 鏈）
+//  - 效能快照：AccountPeriodBalance（期末結餘快照，嚴禁全表 SUM）
+//  - 多租戶：所有業務表含 companyId，UserCompany 控制 RBAC
+//  - 審計：AuditLog 記錄所有關鍵異動
+// ============================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  runtime  = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- 角色 ----------
+enum Role {
+  OWNER
+  ADMIN
+  ACCOUNTANT
+  VIEWER
+}
+
+// ---------- 科目六大類（鐵律：六大類科目獨立公式） ----------
+enum AccountType {
+  ASSET // 1xxx 資產 (借)
+  LIABILITY // 2xxx 負債 (貸)
+  EQUITY // 3xxx 資本 (貸)
+  REVENUE // 4xxx 收入 (貸)
+  COGS // 5xxx 銷貨成本 (借)
+  EXPENSE // 6xxx 費用 (借)
+}
+
+enum DebitCredit {
+  DEBIT
+  CREDIT
+}
+
+enum EntryStatus {
+  POSTED
+  VOID
+}
+
+// ---------- 使用者 ----------
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String?
+  name         String?
+  emailVerified DateTime?
+  image        String?
+  // MFA (TOTP)：secret 以 AES-256-GCM 加密後儲存，明文永不落庫
+  mfaEnabled   Boolean   @default(false)
+  mfaSecretEnc String? // { iv, tag, ciphertext }
+  mfaEnabledAt DateTime?
+
+  companies      UserCompany[]
+  invitations    Invitation[]
+  journalEntries JournalEntry[]
+  auditLogs      AuditLog[]
+  drafts         EncryptedDraft[]
+  passwordResets PasswordResetToken[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+// ---------- 公司（租戶） ----------
+model Company {
+  id     String @id @default(cuid())
+  name   String
+  code   String @unique
+  // 供新公司初始化 hash 鏈之 genesis（不可變）
+  genesisHash String
+
+  users           UserCompany[]
+  accounts        AccountChart[]
+  journalEntries  JournalEntry[]
+  periodBalances  AccountPeriodBalance[]
+  auditLogs       AuditLog[]
+  invitations     Invitation[]
+  drafts          EncryptedDraft[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("companies")
+}
+
+// ---------- 使用者-公司 多對多（多租戶 + RBAC） ----------
+model UserCompany {
+  id        String @id @default(cuid())
+  userId    String
+  companyId String
+  role      Role   @default(ACCOUNTANT)
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, companyId])
+  @@index([companyId])
+  @@map("user_companies")
+}
+
+// ---------- Admin 邀請（無公開註冊） ----------
+model Invitation {
+  id        String   @id @default(cuid())
+  email     String
+  companyId String
+  role      Role     @default(ACCOUNTANT)
+  tokenHash String   @unique // 只存 token 的 SHA-256，DB 洩漏也無法還原連結
+  expiresAt DateTime
+  acceptedAt DateTime?
+  invitedBy String
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  inviter User    @relation(fields: [invitedBy], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@map("invitations")
+}
+
+// ---------- 科目表（code 為穩定主鍵，鐵律：不可漂移） ----------
+model AccountChart {
+  id        String  @id @default(cuid())
+  companyId String
+  code      String // 如 "1101"
+  name      String
+  type      AccountType
+  normal    DebitCredit
+  parentCode String?
+  isActive  Boolean @default(true)
+
+  company        Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  journalLines   JournalLine[]
+  periodBalances AccountPeriodBalance[]
+
+  createdAt DateTime @default(now())
+
+  // 穩定主鍵：company + code 唯一
+  @@unique([companyId, code])
+  @@map("accounts")
+}
+
+// ---------- 正式分錄（防竄改雜湊鏈：Hash_n = SHA256(Hash_{n-1} + Data_n)） ----------
+model JournalEntry {
+  id          String      @id @default(cuid())
+  companyId   String
+  entryNo     Int // 公司內連續編號，決定 hash 鏈順序
+  entryDate   DateTime    @db.Date
+  description String
+  status      EntryStatus @default(POSTED)
+  // 雜湊鏈欄位
+  hash        String      @unique // 本筆 hash（含 prevHash + 本筆 canonical data）
+  prevHash    String // 上一筆 hash（第一筆 = 公司 genesisHash）
+  createdById String
+
+  company   Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  lines     JournalLine[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, entryNo])
+  @@index([companyId, entryDate])
+  @@map("journal_entries")
+}
+
+// ---------- 分錄明細（account_code 穩定引用 accounts.code） ----------
+model JournalLine {
+  id          String  @id @default(cuid())
+  entryId     String
+  companyId   String
+  accountCode String
+  debit       Decimal @default(0) @db.Decimal(18, 2)
+  credit      Decimal @default(0) @db.Decimal(18, 2)
+  description String?
+
+  entry   JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  account AccountChart @relation(fields: [companyId, accountCode], references: [companyId, code], onDelete: Restrict)
+
+  @@index([companyId, accountCode])
+  @@map("journal_lines")
+}
+
+// ---------- 期末結餘快照（效能鐵律：報表 = 快照 + 本期異動） ----------
+model AccountPeriodBalance {
+  id          String  @id @default(cuid())
+  companyId   String
+  accountCode String
+  period      String // "2026-10"（YYYY-MM）
+  // 以「借方為正」的簽名餘額；貸方類科目為負值
+  balance     Decimal @default(0) @db.Decimal(18, 2)
+
+  company Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  account AccountChart  @relation(fields: [companyId, accountCode], references: [companyId, code], onDelete: Cascade)
+
+  @@unique([companyId, accountCode, period])
+  @@index([companyId, period])
+  @@map("account_period_balances")
+}
+
+// ---------- 密碼重設 Token（Email 找回密碼，一次性、限時） ----------
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique // 只存 SHA-256
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ---------- 審計日誌（所有關鍵異動） ----------
+model AuditLog {
+  id        String   @id @default(cuid())
+  companyId String? // 公司層事件必填；帳號層事件（如密碼重設）可為空
+  userId    String
+  action    String // e.g. "JOURNAL_POST", "INVITE_CREATE", "MFA_ENABLE", "PASSWORD_RESET"
+  entity    String
+  entityId  String?
+  details   Json?
+  ip        String?
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
+
+// ---------- 雲端加密草稿備份（伺服器只能存密文，鐵律：雲端無法解密） ----------
+model EncryptedDraft {
+  id            String   @id @default(cuid())
+  userId        String
+  companyId     String?
+  clientDraftId String // 客戶端 UUID，冪等同步
+  // 密文結構：{ v, iv, ciphertext, tag }（AES-256-GCM）
+  payload       Json
+  version       Int      @default(1)
+  // 客戶端 LWW 時間戳（epoch ms，多裝置合併用）
+  clientUpdatedAt BigInt  @default(0)
+  syncedAt      DateTime @default(now())
+  deletedAt     DateTime? // 墓碑：刪除同步
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, clientDraftId])
+  @@index([userId, updatedAt])
+  updatedAt DateTime @updatedAt
+  @@map("encrypted_drafts")
+}
