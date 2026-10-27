@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Admin 邀請管理（鐵律：無公開註冊，僅 ADMIN/OWNER 可發邀請）
+ * Admin 邀請管理（鐵律：無公開註冊，僅 ADMIN 可發邀請；OWNER 無邀請功能）
  * 邀請連結只顯示一次：token 在 DB 只存 SHA-256 hash，無法事後重建。
  */
 import { useState } from "react";

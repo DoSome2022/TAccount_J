@@ -31,7 +31,9 @@ export function AuditList() {
               <td className="py-2 px-4 text-slate-500 whitespace-nowrap">
                 {new Date(l.createdAt).toLocaleString()}
               </td>
-              <td className="py-2 px-4">{l.user.name ?? l.user.email}</td>
+              <td className="py-2 px-4">
+                {l.user ? (l.user.name ?? l.user.email) : "系統"}
+              </td>
               <td className="py-2 px-4 font-mono text-xs">{l.action}</td>
               <td className="py-2 px-4 text-slate-500">
                 {l.entity}

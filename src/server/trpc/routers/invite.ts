@@ -1,18 +1,18 @@
 /**
- * Admin 邀請制 router（僅 ADMIN/OWNER）
+ * Admin 邀請制 router（僅 ADMIN；OWNER 無邀請功能）
  * 邀請連結只回傳一次（token 以 SHA-256 hash 存 DB，無法事後重建）。
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { router } from "@/server/trpc/init";
-import { admin } from "@/server/trpc/procedures";
+import { adminOnly } from "@/server/trpc/procedures";
 import { createInvitation } from "@/server/invite";
 import { Role } from "@/generated/prisma/enums";
 
 const roleEnum = z.enum([Role.OWNER, Role.ADMIN, Role.ACCOUNTANT, Role.VIEWER]);
 
 export const inviteRouter = router({
-  create: admin
+  create: adminOnly
     .input(
       z.object({
         email: z.string().email(),
@@ -38,7 +38,7 @@ export const inviteRouter = router({
       }
     }),
 
-  list: admin.query(async ({ ctx }) => {
+  list: adminOnly.query(async ({ ctx }) => {
     return ctx.prisma.invitation.findMany({
       where: { companyId: ctx.session.activeCompanyId },
       orderBy: { createdAt: "desc" },

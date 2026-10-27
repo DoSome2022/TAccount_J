@@ -4,23 +4,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { consumePasswordResetToken } from "@/server/password-reset";
+import { rateLimit } from "@/server/rate-limit";
 
 const MAX_ATTEMPTS = 10;
-const WINDOW_MS = 15 * 60 * 1000;
-const attempts = new Map<string, { count: number; firstAt: number }>();
+const WINDOW_SEC = 15 * 60;
 
 export async function POST(req: NextRequest) {
   const ip = req.headers.get("x-forwarded-for") ?? "127.0.0.1";
-  const rec = attempts.get(ip) ?? { count: 0, firstAt: Date.now() };
-  if (Date.now() - rec.firstAt > WINDOW_MS) {
-    rec.count = 0;
-    rec.firstAt = Date.now();
-  }
-  if (rec.count >= MAX_ATTEMPTS) {
+  // 速率限制（Redis 分散式／記憶體 fallback）：IP 15 分鐘內最多 10 次
+  const limit = await rateLimit(`reset:${ip}`, MAX_ATTEMPTS, WINDOW_SEC);
+  if (!limit.ok) {
     return NextResponse.json({ code: "RATE_LIMITED", message: "嘗試次數過多，請稍後再試" }, { status: 429 });
   }
-  attempts.set(ip, rec);
-  rec.count++;
 
   const body = await req.json().catch(() => ({}));
   const token = String(body.token ?? "");

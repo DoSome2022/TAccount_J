@@ -117,7 +117,13 @@ async function main() {
   let company = await prisma.company.findUnique({ where: { code: "DEMO" } });
   if (!company) {
     company = await prisma.company.create({
-      data: { name: "示範公司（Demo Co.）", code: "DEMO", genesisHash: "pending" },
+      // 示範公司視為已付費（ACTIVE），否則開發環境會被訂閱閘門擋在付款頁
+      data: {
+        name: "示範公司（Demo Co.）",
+        code: "DEMO",
+        genesisHash: "pending",
+        subscriptionStatus: "ACTIVE",
+      },
     });
   }
   // 創世區塊：以真實 company.id 計算，且在公司建立後立即固化（之後永不可變）

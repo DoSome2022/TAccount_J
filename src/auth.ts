@@ -10,6 +10,7 @@ import { prisma } from "@/server/db";
 import { verifyTotp } from "@/server/totp";
 import { decryptMfaSecret } from "@/server/mfa-enc";
 import { authConfig } from "@/auth.config";
+import { rateLimit, rateLimitReset } from "@/server/rate-limit";
 
 export class MfaRequiredError extends CredentialsSignin {
   code = "MFA_REQUIRED";
@@ -20,10 +21,15 @@ export class InvalidTotpError extends CredentialsSignin {
 export class InvalidCredentialsError extends CredentialsSignin {
   code = "INVALID_CREDENTIALS";
 }
+export class AccountFrozenError extends CredentialsSignin {
+  code = "ACCOUNT_FROZEN";
+}
+export class SubscriptionInactiveError extends CredentialsSignin {
+  code = "SUBSCRIPTION_INACTIVE";
+}
 
 const MAX_ATTEMPTS = 5;
-const WINDOW_MS = 15 * 60 * 1000;
-const attempts = new Map<string, { count: number; firstAt: number }>();
+const WINDOW_SEC = 15 * 60;
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
@@ -40,32 +46,37 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const totpCode = String(creds?.totp ?? "").trim();
         if (!email || !password) throw new InvalidCredentialsError();
 
-        // 簡易速率限制：15 分鐘內同信箱最多 5 次失敗
-        const rec = attempts.get(email) ?? { count: 0, firstAt: Date.now() };
-        if (Date.now() - rec.firstAt > WINDOW_MS) {
-          rec.count = 0;
-          rec.firstAt = Date.now();
-        }
-        if (rec.count >= MAX_ATTEMPTS) throw new InvalidCredentialsError();
-        attempts.set(email, rec);
+        // 速率限制（Redis 分散式／記憶體 fallback）：15 分鐘內同信箱最多 5 次失敗
+        const limit = await rateLimit(`login:${email}`, MAX_ATTEMPTS, WINDOW_SEC);
+        if (!limit.ok) throw new InvalidCredentialsError();
 
         const user = await prisma.user.findUnique({
           where: { email },
-          include: { companies: { orderBy: { company: { createdAt: "asc" } } } },
+          include: {
+            companies: {
+              orderBy: { company: { createdAt: "asc" } },
+              select: {
+                companyId: true,
+                role: true,
+                company: { select: { subscriptionStatus: true } },
+              },
+            },
+          },
         });
         if (!user || !user.passwordHash) {
           // 無此使用者也做一次 bcrypt，防時序側信道
           await bcrypt.compare(password, "$2b$12$C6UzMDM.H6dfI/f/IKcEeO6u0Vz7B7zFTwPvA9ZkQ9m1Y2e0a0x0e");
-          rec.count++;
           throw new InvalidCredentialsError();
         }
 
         const ok = await bcrypt.compare(password, user.passwordHash);
         if (!ok) {
-          rec.count++;
           throw new InvalidCredentialsError();
         }
-        attempts.delete(email);
+        await rateLimitReset(`login:${email}`);
+
+        // 帳號凍結（admin 手動凍結）：密碼正確才揭露，避免帳號狀態洩漏
+        if (user.isFrozen) throw new AccountFrozenError();
 
         // MFA 第二因素
         if (user.mfaEnabled) {
@@ -76,6 +87,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         }
 
         const firstCompany = user.companies[0];
+        // 訂閱閘門（以公司收費、無試用）：非 OWNER 成員在公司訂閱未生效時擋登入。
+        // OWNER 是付款人，可登入前往付款頁（dashboard layout 會限制其頁面）。
+        if (
+          firstCompany &&
+          firstCompany.role !== "OWNER" &&
+          firstCompany.company.subscriptionStatus !== "ACTIVE"
+        ) {
+          throw new SubscriptionInactiveError();
+        }
         return {
           id: user.id,
           email: user.email,

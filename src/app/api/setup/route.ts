@@ -10,36 +10,30 @@ import bcrypt from "bcryptjs";
 import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/server/db";
 import { createCompanyWithChart } from "@/server/company";
+import { rateLimit, rateLimitReset } from "@/server/rate-limit";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CODE_RE = /^[A-Za-z0-9]{2,10}$/;
 
-// 速率限制：同一 IP 15 分鐘內最多 5 次嘗試
+// 速率限制：同一 IP 15 分鐘內最多 5 次嘗試（Redis 分散式／記憶體 fallback）
 const MAX_ATTEMPTS = 5;
-const WINDOW_MS = 15 * 60 * 1000;
-const attempts = new Map<string, { count: number; firstAt: number }>();
+const WINDOW_SEC = 15 * 60;
 
 class SetupClosedError extends Error {}
 class InvalidInputError extends Error {}
 
 export async function POST(req: NextRequest) {
   const ip = req.headers.get("x-forwarded-for") ?? "127.0.0.1";
-  const rec = attempts.get(ip) ?? { count: 0, firstAt: Date.now() };
-  if (Date.now() - rec.firstAt > WINDOW_MS) {
-    rec.count = 0;
-    rec.firstAt = Date.now();
-  }
-  if (rec.count >= MAX_ATTEMPTS) {
+  const limit = await rateLimit(`setup:${ip}`, MAX_ATTEMPTS, WINDOW_SEC);
+  if (!limit.ok) {
     return NextResponse.json({ code: "RATE_LIMITED", message: "嘗試次數過多，請稍後再試" }, { status: 429 });
   }
-  attempts.set(ip, rec);
 
   const body = await req.json().catch(() => ({}));
 
   // SETUP_TOKEN 防線（若有設定環境變數，必須輸入正確 token）
   if (process.env.SETUP_TOKEN) {
     if (String(body.setupToken ?? "") !== process.env.SETUP_TOKEN) {
-      rec.count++;
       return NextResponse.json({ code: "BAD_TOKEN", message: "安裝金鑰錯誤" }, { status: 403 });
     }
   }
@@ -91,10 +85,9 @@ export async function POST(req: NextRequest) {
       return { ok: true };
     });
 
-    attempts.delete(ip);
+    await rateLimitReset(`setup:${ip}`);
     return NextResponse.json(result);
   } catch (e) {
-    rec.count++;
     if (e instanceof SetupClosedError) {
       return NextResponse.json({ code: "ALREADY_SETUP", message: "系統已完成安裝" }, { status: 409 });
     }

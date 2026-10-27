@@ -9,7 +9,8 @@ export const instant = false;
 export default async function InvitesPage() {
   await connection(); // Auth.js 初始化含 crypto.getRandomValues，需於請求時渲染
   const session = await auth();
-  if (!session || (session.activeRole !== "ADMIN" && session.activeRole !== "OWNER")) {
+  // 邀請僅 ADMIN（OWNER 無邀請功能）
+  if (!session || session.activeRole !== "ADMIN") {
     redirect("/dashboard");
   }
   return (

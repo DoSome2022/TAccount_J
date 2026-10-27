@@ -1,7 +1,9 @@
 /**
  * 高效總帳與報表 router（Phase 4）
- * 效能鐵律：所有查詢基於 account_period_balances 快照，
+ * 效能鐵律：試算表/資產負債表/損益表基於 account_period_balances 快照，
  * 絕不對 journal_lines 全表 SUM()。查詢成本 = O(帳戶數)，與分錄總量無關。
+ * 例外：現金流量表（直接法）與逐筆交易試算表必須逐筆讀取「本期」分錄；
+ * 屬單期索引範圍查詢（journal_entries [companyId, entryDate]），非全表掃描。
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -9,7 +11,8 @@ import { Prisma } from "@/generated/prisma/client";
 import { router } from "@/server/trpc/init";
 import { authed } from "@/server/trpc/procedures";
 import { allAccountBalancesAt } from "@/server/snapshots";
-import { prevPeriod, periodOf } from "@/server/accounting";
+import { prevPeriod, periodOf, nextPeriod } from "@/server/accounting";
+import { CASH_ACCOUNT_CODES, summarizeCashFlow } from "@/server/cashflow";
 import { recomputeChain } from "@/server/hashchain";
 
 const PERIOD_RE = /^\d{4}-\d{2}$/;
@@ -52,6 +55,45 @@ export const ledgerRouter = router({
       const totalCredit = rows.reduce((s, r) => s.plus(r.credit), new Prisma.Decimal(0));
 
       return { period, rows, totalDebit, totalCredit, balanced: totalDebit.equals(totalCredit) };
+    }),
+
+  /**
+   * 逐筆交易明細（試算表頁）：本期全部正式分錄，每筆含借/貸科目與金額。
+   * 含 VOID 分錄（前端以「已作廢」標示並排除於合計），單期索引範圍查詢。
+   */
+  entriesByPeriod: authed
+    .input(z.object({ period: z.string().regex(PERIOD_RE).optional() }))
+    .query(async ({ ctx, input }) => {
+      const companyId = ctx.session.activeCompanyId;
+      if (!companyId) throw new TRPCError({ code: "FORBIDDEN", message: "尚未選擇公司" });
+
+      const period = input.period ?? periodOf(new Date());
+      const entries = await ctx.prisma.journalEntry.findMany({
+        where: {
+          companyId,
+          entryDate: {
+            gte: new Date(`${period}-01T00:00:00.000Z`),
+            lt: new Date(`${nextPeriod(period)}-01T00:00:00.000Z`),
+          },
+        },
+        orderBy: { entryNo: "asc" },
+        select: {
+          entryNo: true,
+          entryDate: true,
+          description: true,
+          status: true,
+          lines: {
+            select: {
+              accountCode: true,
+              account: { select: { name: true } },
+              debit: true,
+              credit: true,
+            },
+            orderBy: { accountCode: "asc" },
+          },
+        },
+      });
+      return { period, entries };
     }),
 
   /** 資產負債表（快照直讀；含會計恆等式驗證） */
@@ -162,6 +204,63 @@ export const ledgerRouter = router({
         grossProfit: revenue.minus(cogs),
         expenses,
         netIncome: revenue.minus(cogs).minus(expenses),
+      };
+    }),
+
+  /**
+   * 現金流量表（直接法）：逐筆分類本期「含現金科目」的 POSTED 分錄。
+   * 期初/期末現金仍取快照；三類活動合計必定等於期末−期初（借貸平衡保證）。
+   */
+  cashFlow: authed
+    .input(z.object({ period: z.string().regex(PERIOD_RE).optional() }))
+    .query(async ({ ctx, input }) => {
+      const companyId = ctx.session.activeCompanyId;
+      if (!companyId) throw new TRPCError({ code: "FORBIDDEN", message: "尚未選擇公司" });
+
+      const period = input.period ?? periodOf(new Date());
+      const prev = prevPeriod(period);
+      const [entries, curBalances, preBalances] = await Promise.all([
+        ctx.prisma.journalEntry.findMany({
+          where: {
+            companyId,
+            status: "POSTED",
+            entryDate: {
+              gte: new Date(`${period}-01T00:00:00.000Z`),
+              lt: new Date(`${nextPeriod(period)}-01T00:00:00.000Z`),
+            },
+            lines: { some: { accountCode: { in: [...CASH_ACCOUNT_CODES] } } },
+          },
+          select: {
+            lines: {
+              select: { accountCode: true, debit: true, credit: true },
+            },
+          },
+        }),
+        allAccountBalancesAt(ctx.prisma, companyId, period),
+        allAccountBalancesAt(ctx.prisma, companyId, prev),
+      ]);
+
+      const cashTotal = (balances: Map<string, Prisma.Decimal>) =>
+        CASH_ACCOUNT_CODES.reduce(
+          (sum, code) => sum.plus(balances.get(code) ?? new Prisma.Decimal(0)),
+          new Prisma.Decimal(0),
+        );
+
+      const openingCash = cashTotal(preBalances);
+      const closingCash = cashTotal(curBalances);
+      const netChange = closingCash.minus(openingCash);
+      const flows = summarizeCashFlow(entries);
+
+      return {
+        period,
+        openingCash,
+        closingCash,
+        netChange,
+        operating: flows.operating,
+        investing: flows.investing,
+        financing: flows.financing,
+        totalFlows: flows.totalFlows,
+        reconciled: flows.totalFlows.equals(netChange),
       };
     }),
 

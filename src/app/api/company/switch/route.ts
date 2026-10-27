@@ -17,8 +17,20 @@ export async function POST(req: NextRequest) {
   // Tenant Isolation：必須是該公司成員才能切換
   const membership = await prisma.userCompany.findUnique({
     where: { userId_companyId: { userId: token.uid as string, companyId } },
+    include: { user: { select: { isFrozen: true } }, company: { select: { subscriptionStatus: true } } },
   });
   if (!membership) return NextResponse.json({ code: "FORBIDDEN" }, { status: 403 });
+  // 凍結用戶不得切換公司
+  if (membership.user.isFrozen) {
+    return NextResponse.json({ code: "ACCOUNT_FROZEN", message: "帳號已被凍結" }, { status: 403 });
+  }
+  // 非 OWNER 不得切到訂閱未生效的公司
+  if (membership.role !== "OWNER" && membership.company.subscriptionStatus !== "ACTIVE") {
+    return NextResponse.json(
+      { code: "SUBSCRIPTION_INACTIVE", message: "公司訂閱未生效" },
+      { status: 403 },
+    );
+  }
 
   const updated = await encode({
     secret: process.env.AUTH_SECRET as string,

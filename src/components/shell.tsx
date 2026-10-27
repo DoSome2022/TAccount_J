@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export type ShellCompany = { companyId: string; name: string; code: string; role: string };
 
@@ -23,6 +23,7 @@ export function Shell({
   companies,
   activeCompanyId,
   activeRole,
+  billingBlocked,
   signOutAction,
 }: {
   children: React.ReactNode;
@@ -31,12 +32,23 @@ export function Shell({
   companies: ShellCompany[];
   activeCompanyId: string | null;
   activeRole: string | null;
+  billingBlocked: boolean;
   signOutAction: () => Promise<void>;
 }) {
   const pathname = usePathname();
   const router = useRouter();
   const [switching, setSwitching] = useState(false);
   const isAdmin = activeRole === "ADMIN" || activeRole === "OWNER";
+  // OWNER 無邀請功能（邀請僅 ADMIN）
+  const canInvite = activeRole === "ADMIN";
+  const onBillingPage = pathname.startsWith("/dashboard/settings/billing");
+
+  // 未付費 OWNER 只能停留在付款頁
+  useEffect(() => {
+    if (billingBlocked && !onBillingPage) {
+      router.replace("/dashboard/settings/billing");
+    }
+  }, [billingBlocked, onBillingPage, router]);
 
   async function switchCompany(companyId: string) {
     if (!companyId || companyId === activeCompanyId) return;
@@ -102,17 +114,29 @@ export function Shell({
               {item.label}
             </Link>
           ))}
+          {canInvite && (
+            <Link
+              href="/dashboard/admin/invites"
+              className={`px-3 py-2 text-sm whitespace-nowrap ${
+                pathname.startsWith("/dashboard/admin/invites")
+                  ? "bg-slate-100 text-slate-900 rounded-t-lg font-medium"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              成員邀請
+            </Link>
+          )}
           {isAdmin && (
             <>
               <Link
-                href="/dashboard/admin/invites"
+                href="/dashboard/admin/users"
                 className={`px-3 py-2 text-sm whitespace-nowrap ${
-                  pathname.startsWith("/dashboard/admin")
+                  pathname.startsWith("/dashboard/admin/users")
                     ? "bg-slate-100 text-slate-900 rounded-t-lg font-medium"
                     : "text-slate-300 hover:text-white"
                 }`}
               >
-                成員邀請
+                用戶管理
               </Link>
               <Link
                 href="/dashboard/admin/audit"
@@ -127,9 +151,19 @@ export function Shell({
             </>
           )}
           <Link
+            href="/dashboard/settings/billing"
+            className={`px-3 py-2 text-sm whitespace-nowrap ${
+              pathname.startsWith("/dashboard/settings/billing")
+                ? "bg-slate-100 text-slate-900 rounded-t-lg font-medium"
+                : "text-slate-300 hover:text-white"
+            }`}
+          >
+            訂閱付款
+          </Link>
+          <Link
             href="/dashboard/settings/mfa"
             className={`px-3 py-2 text-sm whitespace-nowrap ${
-              pathname.startsWith("/dashboard/settings")
+              pathname.startsWith("/dashboard/settings/mfa")
                 ? "bg-slate-100 text-slate-900 rounded-t-lg font-medium"
                 : "text-slate-300 hover:text-white"
             }`}
@@ -138,6 +172,19 @@ export function Shell({
           </Link>
         </nav>
       </header>
+      {billingBlocked && (
+        <div className="bg-red-600 text-white">
+          <div className="max-w-7xl mx-auto px-4 py-2 text-sm flex items-center justify-between gap-4">
+            <span>⚠ 公司訂閱未生效，成員無法登入。完成付款後立即解除。</span>
+            <Link
+              href="/dashboard/settings/billing"
+              className="bg-white text-red-700 rounded-lg px-3 py-1 font-medium hover:bg-red-50"
+            >
+              前往付款
+            </Link>
+          </div>
+        </div>
+      )}
       <main className="max-w-7xl mx-auto px-4 py-6">{children}</main>
     </div>
   );

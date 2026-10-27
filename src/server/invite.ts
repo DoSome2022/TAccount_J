@@ -54,7 +54,7 @@ export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-/** ADMIN/OWNER 建立邀請，回傳僅此一次可用的邀請連結 */
+/** ADMIN 建立邀請（OWNER 無邀請功能），回傳僅此一次可用的邀請連結 */
 export async function createInvitation(input: {
   companyId: string;
   email: string;

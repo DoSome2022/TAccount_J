@@ -46,6 +46,14 @@ enum EntryStatus {
   VOID
 }
 
+// ---------- Stripe 訂閱狀態（以公司為收費單位） ----------
+enum SubscriptionStatus {
+  ACTIVE // 已付費、正常使用
+  PAST_DUE // 付款失敗／逾期
+  CANCELED // 已取消
+  INACTIVE // 尚未訂閱（新公司預設；無試用期）
+}
+
 // ---------- 使用者 ----------
 model User {
   id           String    @id @default(cuid())
@@ -58,6 +66,11 @@ model User {
   mfaEnabled   Boolean   @default(false)
   mfaSecretEnc String? // { iv, tag, ciphertext }
   mfaEnabledAt DateTime?
+
+  // 帳號凍結（admin 手動凍結／解凍；凍結者無法登入）
+  isFrozen     Boolean   @default(false)
+  frozenAt     DateTime?
+  frozenReason String?
 
   companies      UserCompany[]
   invitations    Invitation[]
@@ -79,6 +92,12 @@ model Company {
   code   String @unique
   // 供新公司初始化 hash 鏈之 genesis（不可變）
   genesisHash String
+
+  // Stripe 訂閱（以公司為收費單位；無試用期，新公司 INACTIVE）
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  subscriptionStatus   SubscriptionStatus @default(INACTIVE)
+  currentPeriodEnd     DateTime?
 
   users           UserCompany[]
   accounts        AccountChart[]
@@ -229,7 +248,7 @@ model PasswordResetToken {
 model AuditLog {
   id        String   @id @default(cuid())
   companyId String? // 公司層事件必填；帳號層事件（如密碼重設）可為空
-  userId    String
+  userId    String? // 操作者；系統事件（如 Stripe webhook）可為空
   action    String // e.g. "JOURNAL_POST", "INVITE_CREATE", "MFA_ENABLE", "PASSWORD_RESET"
   entity    String
   entityId  String?
@@ -237,7 +256,7 @@ model AuditLog {
   ip        String?
 
   company Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   createdAt DateTime @default(now())
 

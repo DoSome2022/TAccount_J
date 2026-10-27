@@ -23,6 +23,14 @@ export function LoginForm() {
   const [loading, setLoading] = useState(false);
   const justSetUp = searchParams.get("setup") === "done";
   const justReset = searchParams.get("reset") === "done";
+  // layout 強制登出時帶的錯誤碼（凍結／訂閱失效）
+  const urlCode = searchParams.get("code");
+  const urlMessage =
+    urlCode === "ACCOUNT_FROZEN"
+      ? "此帳號已被凍結，請聯絡管理員"
+      : urlCode === "SUBSCRIPTION_INACTIVE"
+        ? "所屬公司訂閱未生效，請聯絡公司負責人完成付款"
+        : null;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -38,10 +46,15 @@ export function LoginForm() {
       if (!res) throw new Error("網路錯誤");
 
       if (res.error) {
-        if (res.error === "MFA_REQUIRED") {
+        // next-auth v5 beta：自訂錯誤碼在 res.code，res.error 固定為 CredentialsSignin
+        if (res.code === "ACCOUNT_FROZEN") {
+          setError("此帳號已被凍結，請聯絡管理員");
+        } else if (res.code === "SUBSCRIPTION_INACTIVE") {
+          setError("所屬公司訂閱未生效，請聯絡公司負責人完成付款");
+        } else if (res.code === "MFA_REQUIRED") {
           setMfaRequired(true);
           setError("此帳號已啟用 MFA，請輸入驗證器上的 6 位數驗證碼");
-        } else if (res.error === "INVALID_TOTP") {
+        } else if (res.code === "INVALID_TOTP") {
           setError("MFA 驗證碼錯誤，請重試");
         } else {
           setError("帳號或密碼錯誤");
@@ -75,6 +88,11 @@ export function LoginForm() {
           ✅ 密碼已重設，請用新密碼登入。
         </p>
       )}
+      {urlMessage && (
+        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          {urlMessage}
+        </p>
+      )}
       <div>
         <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
         <input
@@ -82,7 +100,7 @@ export function LoginForm() {
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
           placeholder="you@company.com"
         />
       </div>
@@ -93,7 +111,7 @@ export function LoginForm() {
           required
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
           placeholder="••••••••"
         />
       </div>
@@ -107,7 +125,7 @@ export function LoginForm() {
             required
             value={totp}
             onChange={(e) => setTotp(e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm tracking-[0.3em] focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 tracking-[0.3em] focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="000000"
             maxLength={6}
           />

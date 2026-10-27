@@ -7,8 +7,12 @@ import nodemailer from "nodemailer";
 
 export type SendResult = { sent: boolean; devLink?: string };
 
-export function appUrl(): string {
-  return process.env.APP_URL ?? "http://localhost:3001";
+/**
+ * 站台網址：以「目前請求的 origin」為準（部署後自動是正式域名），
+ * APP_URL 僅供需要強制覆寫的情境使用。
+ */
+export function appUrl(origin: string): string {
+  return process.env.APP_URL ?? origin;
 }
 
 export async function sendPasswordResetEmail(

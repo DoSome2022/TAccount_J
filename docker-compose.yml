@@ -1,0 +1,13 @@
+# 本機開發用的 Redis（分散式速率限制）
+# 用法：docker compose up -d → .env 設定 REDIS_URL=redis://localhost:6379
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:

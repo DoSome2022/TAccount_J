@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { trpc } from "@/lib/trpc/client";
+import { CashFlow } from "@/components/cash-flow";
 
 function fmt(n: unknown): string {
   return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2 });
@@ -172,6 +173,9 @@ export function Reports() {
           ) : null}
         </section>
       </div>
+
+      {/* 現金流量表（全寬） */}
+      <CashFlow period={period} />
     </div>
   );
 }
