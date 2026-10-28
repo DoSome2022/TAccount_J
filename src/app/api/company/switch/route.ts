@@ -7,11 +7,38 @@ import { getToken } from "next-auth/jwt";
 import { encode } from "next-auth/jwt";
 import { prisma } from "@/server/db";
 
+/**
+ * 與 Auth.js 相同的安全 Cookie 判斷：
+ * Auth.js 以 request URL 的 protocol 決定是否加 __Secure- 前綴，
+ * 而 next-auth 在 AUTH_URL 有值時會用 AUTH_URL 覆寫 request URL。
+ */
+function isSecureSessionCookie(req: NextRequest): boolean {
+  const authUrl = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL;
+  if (authUrl) {
+    try {
+      return new URL(authUrl).protocol === "https:";
+    } catch {
+      // 無效 URL：退回請求判斷
+    }
+  }
+  const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  return req.nextUrl.protocol === "https:" || forwardedProto === "https";
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const companyId = String(body.companyId ?? "");
 
-  const token = await getToken({ req, secret: process.env.AUTH_SECRET });
+  // Cookie 名稱必須與 Auth.js 完全一致（HTTPS 下為 __Secure-authjs.session-token）
+  const secureCookie = isSecureSessionCookie(req);
+  const cookieName = `${secureCookie ? "__Secure-" : ""}authjs.session-token`;
+
+  const token = await getToken({
+    req,
+    secret: process.env.AUTH_SECRET,
+    secureCookie,
+    cookieName,
+  });
   if (!token?.uid) return NextResponse.json({ code: "UNAUTHORIZED" }, { status: 401 });
 
   // Tenant Isolation：必須是該公司成員才能切換
@@ -34,7 +61,9 @@ export async function POST(req: NextRequest) {
 
   const updated = await encode({
     secret: process.env.AUTH_SECRET as string,
-    salt: process.env.AUTH_SECRET as string,
+    // Auth.js 以 session cookie 名稱作為 HKDF salt（非 AUTH_SECRET），
+    // salt 不一致會讓 Auth.js 無法解碼重新簽署的 token
+    salt: cookieName,
     token: {
       ...token,
       activeCompanyId: companyId,
@@ -44,10 +73,11 @@ export async function POST(req: NextRequest) {
   });
 
   const res = NextResponse.json({ ok: true });
-  res.cookies.set("authjs.session-token", updated, {
+  res.cookies.set(cookieName, updated, {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
+    // __Secure- 前綴要求 Secure flag；NODE_ENV=production 時兩者同步啟用
     secure: process.env.NODE_ENV === "production",
   });
   return res;

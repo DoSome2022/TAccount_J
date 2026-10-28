@@ -1,0 +1,92 @@
+# ============================================================
+# TAccounts 生產部署（VPS）：app + PostgreSQL + Redis + migration + Nginx Proxy Manager
+# 用法：cp .env.production.example .env.production 填妥後
+#       docker compose -f docker-compose.prod.yml up -d --build
+# 本機冒煙測試（host 80 被佔用時）：
+#       NPM_HTTP_PORT=8080 NPM_HTTPS_PORT=8443 NPM_ADMIN_PORT=8181 \
+#         docker compose -f docker-compose.prod.yml up -d --build
+# 完整步驟見 部署.md
+# ============================================================
+
+name: taccounts-prod
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env.production
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # 不 publish ports：只有 compose 網路可達
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # 速率限制計數可重建，不掛持久化磁碟；不 publish ports
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    image: taccounts-migrate:local
+    restart: "no"
+    init: true
+    env_file: .env.production
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      target: runner
+    image: taccounts-app:local
+    restart: unless-stopped
+    init: true
+    env_file: .env.production
+    expose:
+      - "3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    # 不 publish ports：只經 NPM 對外
+
+  npm:
+    image: jc21/nginx-proxy-manager:latest
+    restart: unless-stopped
+    # 不可設 init: true —— 此映像內建 s6-overlay，需要自己當 PID 1
+    ports:
+      - "${NPM_HTTP_PORT:-80}:80"
+      - "${NPM_HTTPS_PORT:-443}:443"
+      # 管理介面預設只綁 loopback，透過 SSH 隧道存取。
+      # 若要用 VPN 直連，覆寫 NPM_ADMIN_BIND（並在雲端防火牆限制來源）。
+      - "${NPM_ADMIN_BIND:-127.0.0.1}:${NPM_ADMIN_PORT:-81}:81"
+    volumes:
+      - ./data/npm/data:/data
+      - ./data/npm/letsencrypt:/etc/letsencrypt
+    # 不 depends_on app：app 故障時管理介面仍可進入處理
+
+volumes:
+  db-data:

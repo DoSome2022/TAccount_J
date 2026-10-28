@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Docker 部署用（.next/standalone），本機 dev 不受影響
+  output: "standalone",
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {

@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.gitignore
+.env*
+src/generated
+data
+coverage
+.DS_Store
+*.md
+*.tsbuildinfo
+next-env.d.ts
